@@ -62,10 +62,10 @@ async function fetchBroadcastInfo(channelId: string): Promise<BroadcastInfo> {
       if (!res.ok) { lastError = new Error(`HTTP ${res.status} (${url})`); continue; }
 
       const data = await res.json() as Record<string, unknown>;
-      console.log("[SOOP] player_live_api response:", JSON.stringify(data).slice(0, 400));
 
       // 응답은 { CHANNEL: { RESULT, CHDOMAIN, ... } } 구조
       const ch = (data.CHANNEL ?? data) as Record<string, unknown>;
+      console.log("[SOOP] CHANNEL fields:", JSON.stringify(ch));
 
       const result = Number(ch.RESULT);
       if (result === -6) throw new Error(`채널을 찾을 수 없습니다: ${channelId}`);
