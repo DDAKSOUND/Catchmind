@@ -50,27 +50,43 @@ async function fetchBroadcastInfo(channelId: string): Promise<BroadcastInfo> {
     try {
       const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Referer": "https://play.sooplive.co.kr/",
+          "Origin": "https://play.sooplive.co.kr",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        },
         body: `bid=${encodeURIComponent(channelId)}&mode=landing&player_type=html5`,
         signal: AbortSignal.timeout(8_000),
       });
-      if (!res.ok) { lastError = new Error(`HTTP ${res.status}`); continue; }
+      if (!res.ok) { lastError = new Error(`HTTP ${res.status} (${url})`); continue; }
 
       const data = await res.json() as Record<string, unknown>;
-      if (Number(data.RESULT) !== 1) {
-        throw new Error(`방송 중이 아니거나 채널을 찾을 수 없습니다. (${channelId})`);
-      }
-      return {
-        chatDomain: String(data.CHDOMAIN),
-        chatPort:   String(data.CHPT),
-        chatNo:     String(data.CHATNO),
-        ftk:        String(data.FTK ?? ""),
-        bno:        String(data.BNO),
-      };
+      console.log("[SOOP] player_live_api response:", JSON.stringify(data).slice(0, 400));
+
+      // 응답은 { CHANNEL: { RESULT, CHDOMAIN, ... } } 구조
+      const ch = (data.CHANNEL ?? data) as Record<string, unknown>;
+
+      const result = Number(ch.RESULT);
+      if (result === -6) throw new Error(`채널을 찾을 수 없습니다: ${channelId}`);
+      if (result !== 1)  throw new Error(`방송 중이 아닙니다 (RESULT=${result}, 채널: ${channelId})`);
+
+      const domain = String(ch.CHDOMAIN ?? ch.chdomain ?? "");
+      const port   = String(ch.CHPT    ?? ch.chpt    ?? "9000");
+      const chatNo = String(ch.CHATNO  ?? ch.chatno  ?? "");
+      const bno    = String(ch.BNO     ?? ch.bno     ?? "");
+      const ftk    = String(ch.FTK     ?? ch.ftk     ?? "");
+
+      if (!domain) throw new Error(`SOOP API 응답에 채팅 서버 주소(CHDOMAIN)가 없습니다. 응답: ${JSON.stringify(data).slice(0, 200)}`);
+
+      return { chatDomain: domain, chatPort: port, chatNo, ftk, bno };
     } catch (e) {
       lastError = e instanceof Error ? e : new Error(String(e));
-      // RESULT !== 1 이면 재시도 없이 즉시 throw
-      if (lastError.message.includes("방송 중이 아니거나")) throw lastError;
+      if (
+        lastError.message.includes("찾을 수 없습니다") ||
+        lastError.message.includes("방송 중이 아닙니다") ||
+        lastError.message.includes("CHDOMAIN")
+      ) throw lastError;
     }
   }
   throw lastError;
@@ -96,7 +112,9 @@ export class SoopChatConnector implements ChatConnector {
       // 핸드셰이크 상태: connecting → joining → done
       let stage: "connecting" | "joining" | "done" = "connecting";
 
-      const onHandshake = (_raw: Buffer | string) => {
+      const onHandshake = (raw: Buffer | string) => {
+        const pktType = parseType(raw);
+        console.log(`[SOOP] handshake stage=${stage} pktType=0x${pktType.toString(16)}`);
         if (stage === "connecting") {
           // 서버 CONNECT 응답 수신 → JOIN 전송
           stage = "joining";
@@ -116,7 +134,10 @@ export class SoopChatConnector implements ChatConnector {
         }
       };
 
-      ws.on("open", () => ws.send(buildPacket(PKT_CONNECT, `16${F}`)));
+      ws.on("open", () => {
+        console.log("[SOOP] WebSocket opened, sending CONNECT to", wsUrl);
+        ws.send(buildPacket(PKT_CONNECT, `16${F}`));
+      });
       ws.on("message", onHandshake);
       ws.on("error", (err) => { clearTimeout(timeout); reject(err); });
       ws.on("close", () => {
