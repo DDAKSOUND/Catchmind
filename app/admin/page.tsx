@@ -4,6 +4,7 @@ import SocketProvider, { useSocket } from "@/components/SocketProvider";
 import ScoreBoard from "@/components/ScoreBoard";
 import { useGameStore } from "@/lib/useGameStore";
 import Link from "next/link";
+import type { SoopStatus } from "@/server/socket";
 
 function AdminInner() {
   const { socket } = useSocket();
@@ -12,9 +13,27 @@ function AdminInner() {
   const [logs, setLogs] = useState<string[]>([]);
   const [confirmReset, setConfirmReset] = useState(false);
 
+  // SOOP 연동 상태
+  const [soopChannelId, setSoopChannelId] = useState("");
+  const [soopStatus, setSoopStatus] = useState<SoopStatus>({ connected: false });
+  const [soopLoading, setSoopLoading] = useState(false);
+
   useEffect(() => {
     setSettings(state.settings);
   }, [state.settings]);
+
+  useEffect(() => {
+    if (!socket) return;
+    const onStatus = (status: SoopStatus) => {
+      setSoopStatus(status);
+      setSoopLoading(false);
+      if (status.connected) addLog(`SOOP 채팅 연결됨 (${status.channelId})`);
+      else if (status.error) addLog(`SOOP 연결 실패: ${status.error}`);
+      else addLog("SOOP 채팅 연결 해제됨");
+    };
+    socket.on("soop:status", onStatus);
+    return () => { socket.off("soop:status", onStatus); };
+  }, [socket]);
 
   function saveSettings() {
     socket?.emit("host:updateSettings", settings);
@@ -33,6 +52,19 @@ function AdminInner() {
 
   function addLog(msg: string) {
     setLogs((prev) => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev.slice(0, 49)]);
+  }
+
+  function connectSoop() {
+    if (!soopChannelId.trim()) return;
+    setSoopLoading(true);
+    setSoopStatus({ connected: false });
+    socket?.emit("admin:connectSoop", soopChannelId.trim());
+    addLog(`SOOP 연결 시도 중... (${soopChannelId.trim()})`);
+  }
+
+  function disconnectSoop() {
+    setSoopLoading(true);
+    socket?.emit("admin:disconnectSoop");
   }
 
   return (
@@ -122,6 +154,68 @@ function AdminInner() {
                 설정 저장
               </button>
             </div>
+          </div>
+
+          {/* SOOP 연동 */}
+          <div className="card md:col-span-2">
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-lg font-bold text-[#00f5ff]">🔗 SOOP 채팅 연동</h2>
+              <span
+                className={`rounded-full px-3 py-1 text-xs font-bold ${
+                  soopStatus.connected
+                    ? "bg-green-900 text-green-300"
+                    : "bg-gray-800 text-gray-400"
+                }`}
+              >
+                {soopStatus.connected ? "● 연결됨" : "○ 미연결"}
+              </span>
+            </div>
+
+            {!soopStatus.connected ? (
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  className="input-field flex-1"
+                  placeholder="SOOP 채널 ID (예: jokbo123)"
+                  value={soopChannelId}
+                  onChange={(e) => setSoopChannelId(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && connectSoop()}
+                  disabled={soopLoading}
+                />
+                <button
+                  onClick={connectSoop}
+                  disabled={soopLoading || !soopChannelId.trim()}
+                  className="btn-primary px-5 disabled:opacity-50"
+                >
+                  {soopLoading ? "연결 중..." : "연결"}
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-3">
+                <span className="flex-1 text-sm text-gray-300">
+                  채널: <span className="font-bold text-white">{soopStatus.channelId}</span>
+                  에서 시청자 채팅을 수신 중입니다.
+                </span>
+                <button
+                  onClick={disconnectSoop}
+                  disabled={soopLoading}
+                  className="btn-danger px-4 py-2 text-sm disabled:opacity-50"
+                >
+                  {soopLoading ? "해제 중..." : "연결 해제"}
+                </button>
+              </div>
+            )}
+
+            {soopStatus.error && (
+              <p className="mt-2 rounded-lg bg-red-950 px-3 py-2 text-sm text-red-400">
+                ⚠️ {soopStatus.error}
+              </p>
+            )}
+
+            <p className="mt-3 text-xs text-gray-600">
+              연결하면 시청자가 SOOP 채팅에 입력하는 <code className="text-gray-400">!정답 [내용]</code> 명령어가 자동으로 판정됩니다.
+              Mock Chat과 동시에 사용할 수 있습니다.
+            </p>
           </div>
 
           {/* Score management */}

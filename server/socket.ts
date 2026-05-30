@@ -1,13 +1,21 @@
 import { Server as IOServer } from "socket.io";
 import type { Server as HTTPServer } from "http";
 import { GameEngine } from "./gameEngine";
+import { SoopChatConnector } from "@/connectors/SoopChatConnector";
 import type { DrawingEvent } from "@/types/drawing";
 import type { ChatMessage } from "@/types/chat";
 import type { GameState } from "@/types/game";
 
 let gameEngine: GameEngine | null = null;
+let soopConnector: SoopChatConnector | null = null;
 
 const overlaySocketIds = new Set<string>();
+
+export interface SoopStatus {
+  connected: boolean;
+  channelId?: string;
+  error?: string;
+}
 
 function stripAnswerForOverlay(state: GameState): GameState {
   // Never expose the answer to overlay during playing state
@@ -97,6 +105,37 @@ export function initSocket(httpServer: HTTPServer): IOServer {
     socket.on("host:updateSettings", (settings: Partial<import("@/types/game").GameSettings>) => {
       gameEngine!.updateSettings(settings);
     });
+
+    // ── SOOP 연동 ──────────────────────────────────────────────────
+
+    socket.on("admin:connectSoop", async (channelId: string) => {
+      try {
+        if (soopConnector) {
+          await soopConnector.disconnect();
+          soopConnector = null;
+        }
+        soopConnector = new SoopChatConnector();
+        soopConnector.onMessage((msg: ChatMessage) => gameEngine!.processChat(msg));
+        await soopConnector.connect(channelId);
+        io.emit("soop:status", { connected: true, channelId } satisfies SoopStatus);
+      } catch (err) {
+        soopConnector = null;
+        io.emit("soop:status", { connected: false, error: String(err instanceof Error ? err.message : err) } satisfies SoopStatus);
+      }
+    });
+
+    socket.on("admin:disconnectSoop", async () => {
+      if (soopConnector) {
+        await soopConnector.disconnect();
+        soopConnector = null;
+      }
+      io.emit("soop:status", { connected: false } satisfies SoopStatus);
+    });
+
+    // 새로 접속한 클라이언트에 현재 SOOP 상태 전송
+    if (soopConnector?.isConnected()) {
+      socket.emit("soop:status", { connected: true } satisfies SoopStatus);
+    }
 
     // ── Drawing ────────────────────────────────────────────────────
 
