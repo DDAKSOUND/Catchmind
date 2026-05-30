@@ -100,51 +100,63 @@ export class SoopChatConnector implements ChatConnector {
 
   async connect(channelId: string): Promise<void> {
     const info = await fetchBroadcastInfo(channelId);
-    const wsUrl = `wss://${info.chatDomain}:${info.chatPort}/Websocket/${channelId}`;
-
-    // JOIN 패킷 바디: 첫 필드 비어있음, 이후 채널/방번호/토큰 등
     const joinBody = ["", channelId, info.bno, "0", "0", "", info.ftk, "", "2", info.chatNo, ""].join(F);
+    const wsHeaders = {
+      "Origin": "https://play.sooplive.co.kr",
+      "Referer": "https://play.sooplive.co.kr/",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    };
 
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(wsUrl);
-      const timeout = setTimeout(() => { ws.terminate(); reject(new Error("연결 시간 초과 (15초)")); }, 15_000);
+    const tryConnect = (wsUrl: string): Promise<void> =>
+      new Promise((resolve, reject) => {
+        console.log("[SOOP] connecting to", wsUrl);
+        const ws = new WebSocket(wsUrl, { headers: wsHeaders });
+        const timeout = setTimeout(() => { ws.terminate(); reject(new Error("timeout")); }, 12_000);
 
-      // 핸드셰이크 상태: connecting → joining → done
-      let stage: "connecting" | "joining" | "done" = "connecting";
+        let stage: "connecting" | "joining" | "done" = "connecting";
 
-      const onHandshake = (raw: Buffer | string) => {
-        const pktType = parseType(raw);
-        console.log(`[SOOP] handshake stage=${stage} pktType=0x${pktType.toString(16)}`);
-        if (stage === "connecting") {
-          // 서버 CONNECT 응답 수신 → JOIN 전송
-          stage = "joining";
-          ws.send(buildPacket(PKT_JOIN, joinBody));
-        } else if (stage === "joining") {
-          // 서버 JOIN 응답 수신 → 연결 완료
-          stage = "done";
+        const onHandshake = (raw: Buffer | string) => {
+          const pktType = parseType(raw);
+          console.log(`[SOOP] handshake stage=${stage} pktType=0x${pktType.toString(16)}`);
+          if (stage === "connecting") {
+            stage = "joining";
+            ws.send(buildPacket(PKT_JOIN, joinBody));
+          } else if (stage === "joining") {
+            stage = "done";
+            clearTimeout(timeout);
+            this._connected = true;
+            this.ws = ws;
+            this.startPing();
+            ws.off("message", onHandshake);
+            ws.on("message", (r: Buffer | string) => this.handleMessage(r));
+            ws.on("close", () => { this._connected = false; this.stopPing(); });
+            resolve();
+          }
+        };
+
+        ws.on("open", () => {
+          console.log("[SOOP] WebSocket opened:", wsUrl);
+          ws.send(buildPacket(PKT_CONNECT, `16${F}`));
+        });
+        ws.on("message", onHandshake);
+        ws.on("error", (err) => { clearTimeout(timeout); reject(err); });
+        ws.on("close", () => {
           clearTimeout(timeout);
-          this._connected = true;
-          this.ws = ws;
-          this.startPing();
-
-          ws.off("message", onHandshake);
-          ws.on("message", (r: Buffer | string) => this.handleMessage(r));
-          ws.on("close", () => { this._connected = false; this.stopPing(); });
-          resolve();
-        }
-      };
-
-      ws.on("open", () => {
-        console.log("[SOOP] WebSocket opened, sending CONNECT to", wsUrl);
-        ws.send(buildPacket(PKT_CONNECT, `16${F}`));
+          if (stage !== "done") reject(new Error("closed"));
+        });
       });
-      ws.on("message", onHandshake);
-      ws.on("error", (err) => { clearTimeout(timeout); reject(err); });
-      ws.on("close", () => {
-        clearTimeout(timeout);
-        if (stage !== "done") reject(new Error("WebSocket 연결이 닫혔습니다"));
-      });
-    });
+
+    const base = `${info.chatDomain}:${info.chatPort}/Websocket/${channelId}`;
+    try {
+      await tryConnect(`wss://${base}`);
+    } catch (e1) {
+      console.log("[SOOP] wss:// failed:", e1, "— retrying with ws://");
+      try {
+        await tryConnect(`ws://${base}`);
+      } catch (e2) {
+        throw new Error(`SOOP 채팅 서버 연결 실패 (wss/ws 모두 실패). 채널: ${channelId}`);
+      }
+    }
   }
 
   private handleMessage(raw: Buffer | string): void {
