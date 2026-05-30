@@ -107,10 +107,16 @@ export class SoopChatConnector implements ChatConnector {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     };
 
-    const tryConnect = (wsUrl: string): Promise<void> =>
+    const tryConnect = (wsUrl: string, rejectUnauthorized = true): Promise<void> =>
       new Promise((resolve, reject) => {
-        console.log("[SOOP] connecting to", wsUrl);
-        const ws = new WebSocket(wsUrl, { headers: wsHeaders });
+        console.log("[SOOP] connecting to", wsUrl, rejectUnauthorized ? "" : "(rejectUnauthorized=false)");
+        const wsOpts: import("ws").ClientOptions = {
+          headers: wsHeaders,
+          ...(wsUrl.startsWith("wss://") && !rejectUnauthorized
+            ? { rejectUnauthorized: false }
+            : {}),
+        };
+        const ws = new WebSocket(wsUrl, wsOpts);
         const timeout = setTimeout(() => { ws.terminate(); reject(new Error("timeout")); }, 12_000);
 
         let stage: "connecting" | "joining" | "done" = "connecting";
@@ -147,16 +153,22 @@ export class SoopChatConnector implements ChatConnector {
       });
 
     const base = `${info.chatDomain}:${info.chatPort}/Websocket/${channelId}`;
-    try {
-      await tryConnect(`wss://${base}`);
-    } catch (e1) {
-      console.log("[SOOP] wss:// failed:", e1, "— retrying with ws://");
+    const attempts: Array<[string, boolean]> = [
+      [`wss://${base}`, true],   // wss + cert 검증
+      [`wss://${base}`, false],  // wss + 자체서명 인증서 허용
+      [`ws://${base}`,  true],   // ws (평문)
+    ];
+    let lastErr: Error = new Error("알 수 없는 오류");
+    for (const [url, rejectUnauth] of attempts) {
       try {
-        await tryConnect(`ws://${base}`);
-      } catch (e2) {
-        throw new Error(`SOOP 채팅 서버 연결 실패 (wss/ws 모두 실패). 채널: ${channelId}`);
+        await tryConnect(url, rejectUnauth);
+        return;
+      } catch (e) {
+        lastErr = e instanceof Error ? e : new Error(String(e));
+        console.log(`[SOOP] attempt failed (${url}):`, lastErr.message);
       }
     }
+    throw new Error(`SOOP 채팅 서버 연결 실패. 채널: ${channelId} / 마지막 오류: ${lastErr.message}`);
   }
 
   private handleMessage(raw: Buffer | string): void {
