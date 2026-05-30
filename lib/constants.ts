@@ -1,4 +1,4 @@
-export const DEFAULT_TIME_LIMIT = 60;
+export const DEFAULT_TIME_LIMIT = 180;
 export const DEFAULT_BASE_SCORE = 100;
 export const DEFAULT_RANKING_COUNT = 10;
 export const ANSWER_COMMAND_PREFIX = "!정답";

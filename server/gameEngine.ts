@@ -155,6 +155,17 @@ export class GameEngine {
       this.state.timeLeft = Math.max(0, this.state.timeLeft - 1);
       this.emit("timer:tick", { timeLeft: this.state.timeLeft });
 
+      // 힌트가 설정되어 있고 아직 공개 안 됐을 때, 60초 남으면 자동 공개
+      if (
+        this.state.timeLeft === 60 &&
+        this.state.hintLevel === 0 &&
+        this.state.currentHint.trim() &&
+        this.state.settings.useHint
+      ) {
+        this.state.hintLevel = 1;
+        this.emit("game:state", this.state);
+      }
+
       if (this.state.timeLeft <= 0) {
         this.stopTimer();
         this.endRound();

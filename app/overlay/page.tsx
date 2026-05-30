@@ -14,6 +14,8 @@ function OverlayInner({ onMount }: { onMount: (canvas: HTMLCanvasElement) => voi
   const state = useGameStore();
   const [showWinner, setShowWinner] = useState(false);
   const prevWinnerRef = useRef<string | undefined>(undefined);
+  const prevHintLevelRef = useRef(0);
+  const [hintJustRevealed, setHintJustRevealed] = useState(false);
 
   useEffect(() => {
     if (
@@ -25,6 +27,16 @@ function OverlayInner({ onMount }: { onMount: (canvas: HTMLCanvasElement) => voi
       setShowWinner(true);
     }
   }, [state.recentWinner, state.roundStatus]);
+
+  // 힌트가 처음 공개되는 순간 애니메이션 트리거
+  useEffect(() => {
+    if (state.hintLevel > 0 && prevHintLevelRef.current === 0) {
+      setHintJustRevealed(true);
+      const timer = setTimeout(() => setHintJustRevealed(false), 2500);
+      return () => clearTimeout(timer);
+    }
+    prevHintLevelRef.current = state.hintLevel;
+  }, [state.hintLevel]);
 
   useEffect(() => {
     const canvas = containerRef.current?.querySelector("canvas");
@@ -64,12 +76,29 @@ function OverlayInner({ onMount }: { onMount: (canvas: HTMLCanvasElement) => voi
           {isPlaying && (
             <div className="text-lg text-gray-300">
               힌트:{" "}
-              <span
-                className="font-black text-[#ffbe0b]"
-                style={{ textShadow: "0 0 10px #ffbe0b", letterSpacing: "0.3em" }}
-              >
-                {state.currentHint || "???"}
-              </span>
+              {state.hintLevel >= 1 ? (
+                <span
+                  className={`font-black text-[#ffbe0b] transition-all duration-500 ${
+                    hintJustRevealed ? "scale-125 text-[#fff700]" : ""
+                  }`}
+                  style={{
+                    textShadow: hintJustRevealed
+                      ? "0 0 25px #fff700, 0 0 50px #ffbe0b"
+                      : "0 0 10px #ffbe0b",
+                    letterSpacing: "0.3em",
+                    display: "inline-block",
+                  }}
+                >
+                  {state.currentHint || "???"}
+                </span>
+              ) : (
+                <span
+                  className="font-black text-gray-600"
+                  style={{ letterSpacing: "0.3em" }}
+                >
+                  ???
+                </span>
+              )}
             </div>
           )}
           {isPlaying && (
@@ -128,6 +157,22 @@ function OverlayInner({ onMount }: { onMount: (canvas: HTMLCanvasElement) => voi
         {isEnded && !state.isAnswerRevealed && <div />}
         {isPlaying && <div />}
       </div>
+
+      {/* 힌트 자동 공개 알림 */}
+      {hintJustRevealed && (
+        <div
+          className="pointer-events-none absolute left-1/2 top-24 z-30 -translate-x-1/2 rounded-xl border border-[#ffbe0b]/40 bg-[#0a0a0f]/90 px-8 py-4 text-center backdrop-blur-sm"
+          style={{ boxShadow: "0 0 30px #ffbe0b44" }}
+        >
+          <p className="text-sm text-gray-400">⏰ 1분 남았습니다!</p>
+          <p
+            className="mt-1 text-2xl font-black text-[#ffbe0b]"
+            style={{ textShadow: "0 0 15px #ffbe0b" }}
+          >
+            💡 힌트 공개!
+          </p>
+        </div>
+      )}
 
       {/* Winner popup */}
       {showWinner && state.recentWinner && (

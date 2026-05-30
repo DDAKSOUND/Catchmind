@@ -1,5 +1,5 @@
 {
-  "defaultTimeLimit": 60,
+  "defaultTimeLimit": 180,
   "defaultBaseScore": 100,
   "useHint": true,
   "showWrongAnswers": true,
