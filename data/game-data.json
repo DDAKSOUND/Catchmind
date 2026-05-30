@@ -1,0 +1,20 @@
+{
+  "players": [],
+  "rounds": [
+    {
+      "roundNumber": 1,
+      "answer": "징버거가 최고야",
+      "duration": 60,
+      "startedAt": "2026-05-30T05:52:10.766Z",
+      "endedAt": "2026-05-30T05:53:11.289Z"
+    }
+  ],
+  "settings": {
+    "defaultTimeLimit": 60,
+    "defaultBaseScore": 100,
+    "useHint": true,
+    "showWrongAnswers": true,
+    "rankingDisplayCount": 10,
+    "hintScorePenalty": false
+  }
+}

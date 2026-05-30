@@ -1,0 +1,8 @@
+{
+  "defaultTimeLimit": 60,
+  "defaultBaseScore": 100,
+  "useHint": true,
+  "showWrongAnswers": true,
+  "rankingDisplayCount": 10,
+  "hintScorePenalty": false
+}
