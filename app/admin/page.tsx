@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect } from "react";
 import SocketProvider, { useSocket } from "@/components/SocketProvider";
+import PinAuth from "@/components/PinAuth";
 import ScoreBoard from "@/components/ScoreBoard";
 import { useGameStore } from "@/lib/useGameStore";
 import Link from "next/link";
@@ -15,6 +16,8 @@ function AdminInner() {
 
   // SOOP 연동 상태
   const [soopChannelId, setSoopChannelId] = useState("");
+  const [soopUid, setSoopUid] = useState("");
+  const [soopPassword, setSoopPassword] = useState("");
   const [soopStatus, setSoopStatus] = useState<SoopStatus>({ connected: false });
   const [soopLoading, setSoopLoading] = useState(false);
 
@@ -26,9 +29,10 @@ function AdminInner() {
     if (!socket) return;
     const onStatus = (status: SoopStatus) => {
       setSoopStatus(status);
-      setSoopLoading(false);
+      if (status.connected || status.error) setSoopLoading(false);
       if (status.connected) addLog(`SOOP 채팅 연결됨 (${status.channelId})`);
       else if (status.error) addLog(`SOOP 연결 실패: ${status.error}`);
+      else if (status.status) addLog(`SOOP: ${status.status}`);
       else addLog("SOOP 채팅 연결 해제됨");
     };
     socket.on("soop:status", onStatus);
@@ -58,7 +62,11 @@ function AdminInner() {
     if (!soopChannelId.trim()) return;
     setSoopLoading(true);
     setSoopStatus({ connected: false });
-    socket?.emit("admin:connectSoop", soopChannelId.trim());
+    socket?.emit("admin:connectSoop", {
+      channelId: soopChannelId.trim(),
+      uid: soopUid.trim() || undefined,
+      password: soopPassword || undefined,
+    });
     addLog(`SOOP 연결 시도 중... (${soopChannelId.trim()})`);
   }
 
@@ -172,23 +180,46 @@ function AdminInner() {
             </div>
 
             {!soopStatus.connected ? (
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  className="input-field flex-1"
-                  placeholder="SOOP 채널 ID (예: jokbo123)"
-                  value={soopChannelId}
-                  onChange={(e) => setSoopChannelId(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && connectSoop()}
-                  disabled={soopLoading}
-                />
-                <button
-                  onClick={connectSoop}
-                  disabled={soopLoading || !soopChannelId.trim()}
-                  className="btn-primary px-5 disabled:opacity-50"
-                >
-                  {soopLoading ? "연결 중..." : "연결"}
-                </button>
+              <div className="flex flex-col gap-2">
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    className="input-field flex-1"
+                    placeholder="SOOP 아이디 (로그인용)"
+                    value={soopUid}
+                    onChange={(e) => setSoopUid(e.target.value)}
+                    disabled={soopLoading}
+                    autoComplete="username"
+                  />
+                  <input
+                    type="password"
+                    className="input-field flex-1"
+                    placeholder="비밀번호"
+                    value={soopPassword}
+                    onChange={(e) => setSoopPassword(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && connectSoop()}
+                    disabled={soopLoading}
+                    autoComplete="current-password"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    className="input-field flex-1"
+                    placeholder="채널 ID (예: jokbo123, 아이디와 동일한 경우 생략 가능)"
+                    value={soopChannelId}
+                    onChange={(e) => setSoopChannelId(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && connectSoop()}
+                    disabled={soopLoading}
+                  />
+                  <button
+                    onClick={connectSoop}
+                    disabled={soopLoading || !soopChannelId.trim()}
+                    className="btn-primary px-5 disabled:opacity-50"
+                  >
+                    {soopLoading ? (soopStatus.status ?? "연결 중...") : "연결"}
+                  </button>
+                </div>
               </div>
             ) : (
               <div className="flex items-center gap-3">
@@ -213,8 +244,9 @@ function AdminInner() {
             )}
 
             <p className="mt-3 text-xs text-gray-600">
-              연결하면 시청자가 SOOP 채팅에 입력하는 <code className="text-gray-400">!정답 [내용]</code> 명령어가 자동으로 판정됩니다.
-              Mock Chat과 동시에 사용할 수 있습니다.
+              아이디/비밀번호 입력 시 SOOP 계정으로 로그인 후 연결합니다 (FTK 인증 필요).
+              입력하지 않으면 비로그인으로 시도합니다. 연결 후 시청자가 입력하는{" "}
+              <code className="text-gray-400">!정답 [내용]</code> 채팅이 자동 판정됩니다.
             </p>
           </div>
 
@@ -263,7 +295,7 @@ function AdminInner() {
             <h2 className="mb-3 text-lg font-bold text-gray-400">OBS 설정 가이드</h2>
             <div className="rounded-lg bg-[#0a0a0f] p-4 font-mono text-sm text-gray-400">
               <p className="mb-2 text-[#00f5ff]">Browser Source URL:</p>
-              <p className="text-white">http://localhost:3000/overlay</p>
+              <p className="text-white">https://catchmind-production-a9d1.up.railway.app/overlay</p>
               <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
                 <span className="text-gray-500">Width:</span> <span>1920</span>
                 <span className="text-gray-500">Height:</span> <span>1080</span>
@@ -282,7 +314,9 @@ function AdminInner() {
 export default function AdminPage() {
   return (
     <SocketProvider clientType="admin">
-      <AdminInner />
+      <PinAuth>
+        <AdminInner />
+      </PinAuth>
     </SocketProvider>
   );
 }

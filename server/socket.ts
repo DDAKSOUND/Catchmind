@@ -10,33 +10,47 @@ let gameEngine: GameEngine | null = null;
 let soopConnector: SoopChatConnector | null = null;
 
 const overlaySocketIds = new Set<string>();
+const authedSocketIds  = new Set<string>();
+
+const ADMIN_PIN = process.env.ADMIN_PIN ?? "";
+
+if (!ADMIN_PIN) {
+  console.warn("[보안 경고] ADMIN_PIN 환경변수가 설정되지 않았습니다. .env.local 파일을 확인하세요.");
+}
 
 export interface SoopStatus {
   connected: boolean;
   channelId?: string;
   error?: string;
+  status?: string;
 }
 
 function stripAnswerForOverlay(state: GameState): GameState {
-  // Never expose the answer to overlay during playing state
   if (state.roundStatus === "playing" || !state.isAnswerRevealed) {
     return { ...state, currentAnswer: "" };
   }
   return state;
 }
 
+function getAllowedOrigins(): string[] | string {
+  const raw = process.env.ALLOWED_ORIGINS ?? "";
+  if (!raw) return "*";
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
 export function initSocket(httpServer: HTTPServer): IOServer {
   const io = new IOServer(httpServer, {
-    cors: { origin: "*", methods: ["GET", "POST"] },
+    cors: {
+      origin: getAllowedOrigins(),
+      methods: ["GET", "POST"],
+    },
   });
 
-  // Drawing paths stored server-side so late-joining overlays get full sync
   let drawPaths: DrawingEvent[] = [];
 
   gameEngine = new GameEngine((event, data) => {
     if (event === "game:state") {
       const state = data as GameState;
-      // Broadcast to all, but strip answer for overlay sockets
       for (const [id, socket] of io.sockets.sockets) {
         if (overlaySocketIds.has(id)) {
           socket.emit("game:state", stripAnswerForOverlay(state));
@@ -56,7 +70,7 @@ export function initSocket(httpServer: HTTPServer): IOServer {
       overlaySocketIds.add(socket.id);
     }
 
-    // Send full game state on connect
+    // 상태 전송 (누구나)
     const state = gameEngine!.getState();
     if (clientType === "overlay") {
       socket.emit("game:state", stripAnswerForOverlay(state));
@@ -64,51 +78,65 @@ export function initSocket(httpServer: HTTPServer): IOServer {
       socket.emit("game:state", state);
     }
 
-    // Send drawing history to new clients
     const syncPaths = drawPaths.map((e) => e.path).filter(Boolean);
     socket.emit("drawing:sync", { paths: syncPaths });
 
+    // ── 인증 ──────────────────────────────────────────────────────
+
+    socket.on("admin:auth", (pin: string, callback?: (ok: boolean) => void) => {
+      if (!ADMIN_PIN) {
+        // PIN 미설정 시 개발 환경에서는 허용
+        authedSocketIds.add(socket.id);
+        callback?.(true);
+        return;
+      }
+      if (pin === ADMIN_PIN) {
+        authedSocketIds.add(socket.id);
+        callback?.(true);
+      } else {
+        callback?.(false);
+      }
+    });
+
+    function requireAuth(handler: (...args: unknown[]) => void) {
+      return (...args: unknown[]) => {
+        if (!authedSocketIds.has(socket.id)) return;
+        handler(...args);
+      };
+    }
+
     // ── Host → Server ──────────────────────────────────────────────
 
-    socket.on("host:startRound", (payload: {
-      answer: string;
-      hint: string;
-      timeLimit: number;
-      baseScore: number;
-    }) => {
+    socket.on("host:startRound", requireAuth((payload: unknown) => {
+      const p = payload as { answer: string; hint: string; timeLimit: number; baseScore: number };
       drawPaths = [];
       io.emit("drawing:sync", { paths: [] });
-      gameEngine!.startRound(payload);
-    });
+      gameEngine!.startRound(p);
+    }));
 
-    socket.on("host:endRound", () => {
-      gameEngine!.endRound();
-    });
+    socket.on("host:endRound",    requireAuth(() => { gameEngine!.endRound(); }));
+    socket.on("host:skipRound",   requireAuth(() => { gameEngine!.skipRound(); }));
+    socket.on("host:revealAnswer",requireAuth(() => { gameEngine!.revealAnswer(); }));
 
-    socket.on("host:skipRound", () => {
-      gameEngine!.skipRound();
-    });
-
-    socket.on("host:revealAnswer", () => {
-      gameEngine!.revealAnswer();
-    });
-
-    socket.on("host:clearCanvas", () => {
+    socket.on("host:clearCanvas", requireAuth(() => {
       drawPaths = [];
       io.emit("drawing:sync", { paths: [] });
-    });
+    }));
 
-    socket.on("host:resetScores", () => {
-      gameEngine!.resetScores();
-    });
+    socket.on("host:resetScores", requireAuth(() => { gameEngine!.resetScores(); }));
 
-    socket.on("host:updateSettings", (settings: Partial<import("@/types/game").GameSettings>) => {
-      gameEngine!.updateSettings(settings);
-    });
+    socket.on("host:updateSettings", requireAuth((settings: unknown) => {
+      gameEngine!.updateSettings(settings as Partial<import("@/types/game").GameSettings>);
+    }));
 
     // ── SOOP 연동 ──────────────────────────────────────────────────
 
-    socket.on("admin:connectSoop", async (channelId: string) => {
+    socket.on("admin:connectSoop", requireAuth(async (payload: unknown) => {
+      const p = payload as string | { channelId: string; uid?: string; password?: string };
+      const channelId = typeof p === "string" ? p : p.channelId;
+      const uid       = typeof p === "object" ? p.uid : undefined;
+      const password  = typeof p === "object" ? p.password : undefined;
+
       try {
         if (soopConnector) {
           await soopConnector.disconnect();
@@ -116,49 +144,59 @@ export function initSocket(httpServer: HTTPServer): IOServer {
         }
         soopConnector = new SoopChatConnector();
         soopConnector.onMessage((msg: ChatMessage) => gameEngine!.processChat(msg));
+
+        if (uid && password) {
+          io.emit("soop:status", { connected: false, status: "로그인 중..." } satisfies SoopStatus);
+          await soopConnector.login(uid, password);
+        }
+
+        io.emit("soop:status", { connected: false, status: "채팅 서버 연결 중..." } satisfies SoopStatus);
         await soopConnector.connect(channelId);
         io.emit("soop:status", { connected: true, channelId } satisfies SoopStatus);
       } catch (err) {
         soopConnector = null;
-        io.emit("soop:status", { connected: false, error: String(err instanceof Error ? err.message : err) } satisfies SoopStatus);
+        io.emit("soop:status", {
+          connected: false,
+          error: err instanceof Error ? err.message : String(err),
+        } satisfies SoopStatus);
       }
-    });
+    }));
 
-    socket.on("admin:disconnectSoop", async () => {
+    socket.on("admin:disconnectSoop", requireAuth(async () => {
       if (soopConnector) {
         await soopConnector.disconnect();
         soopConnector = null;
       }
       io.emit("soop:status", { connected: false } satisfies SoopStatus);
-    });
+    }));
 
-    // 새로 접속한 클라이언트에 현재 SOOP 상태 전송
     if (soopConnector?.isConnected()) {
       socket.emit("soop:status", { connected: true } satisfies SoopStatus);
     }
 
     // ── Drawing ────────────────────────────────────────────────────
 
-    socket.on("drawing:update", (event: DrawingEvent) => {
-      if (event.type === "clear") {
+    socket.on("drawing:update", requireAuth((event: unknown) => {
+      const e = event as DrawingEvent;
+      if (e.type === "clear") {
         drawPaths = [];
-      } else if (event.type === "end" && event.path) {
-        drawPaths.push(event);
-      } else if (event.type === "undo") {
+      } else if (e.type === "end" && e.path) {
+        drawPaths.push(e);
+      } else if (e.type === "undo") {
         drawPaths = drawPaths.slice(0, -1);
       }
-      // Broadcast to all except sender
-      socket.broadcast.emit("drawing:update", event);
-    });
+      socket.broadcast.emit("drawing:update", e);
+    }));
 
-    // ── Chat ───────────────────────────────────────────────────────
+    // ── Chat (Mock) ────────────────────────────────────────────────
 
-    socket.on("chat:message", (message: ChatMessage) => {
-      gameEngine!.processChat(message);
-    });
+    socket.on("chat:message", requireAuth((message: unknown) => {
+      gameEngine!.processChat(message as ChatMessage);
+    }));
 
     socket.on("disconnect", () => {
       overlaySocketIds.delete(socket.id);
+      authedSocketIds.delete(socket.id);
     });
   });
 

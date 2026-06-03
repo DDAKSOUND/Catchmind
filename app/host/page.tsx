@@ -1,6 +1,7 @@
 "use client";
 import { useRef, useCallback } from "react";
 import SocketProvider, { useSocket } from "@/components/SocketProvider";
+import PinAuth from "@/components/PinAuth";
 import DrawingCanvas from "@/components/DrawingCanvas";
 import GameControlPanel from "@/components/GameControlPanel";
 import MockChatInput from "@/components/MockChatInput";
@@ -139,7 +140,9 @@ export default function HostPage() {
       clientType="host"
       onDrawingEvent={(e) => drawingEventHandlersRef.current.forEach((h) => h(e))}
     >
-      <HostInner />
+      <PinAuth>
+        <HostInner />
+      </PinAuth>
     </SocketProvider>
   );
 }

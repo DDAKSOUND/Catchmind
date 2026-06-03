@@ -38,73 +38,139 @@ interface BroadcastInfo {
   bno: string;
 }
 
-async function fetchBroadcastInfo(channelId: string): Promise<BroadcastInfo> {
-  const endpoints = [
-    "https://live.sooplive.co.kr/afreeca/player_live_api.php",
-    "https://live.afreecatv.com/afreeca/player_live_api.php",
-  ];
+const LOGIN_ENDPOINTS = [
+  "https://login.sooplive.com/app/LoginAction.php",
+  "https://login.sooplive.co.kr/app/LoginAction.php",
+];
 
-  let lastError: Error = new Error("알 수 없는 오류");
+const API_ENDPOINTS = [
+  "https://live.sooplive.co.kr/afreeca/player_live_api.php",
+  "https://live.afreecatv.com/afreeca/player_live_api.php",
+];
 
-  for (const url of endpoints) {
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "Referer": "https://play.sooplive.co.kr/",
-          "Origin": "https://play.sooplive.co.kr",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        },
-        body: `bid=${encodeURIComponent(channelId)}&mode=landing&player_type=html5`,
-        signal: AbortSignal.timeout(8_000),
-      });
-      if (!res.ok) { lastError = new Error(`HTTP ${res.status} (${url})`); continue; }
-
-      const data = await res.json() as Record<string, unknown>;
-
-      // 응답은 { CHANNEL: { RESULT, CHDOMAIN, ... } } 구조
-      const ch = (data.CHANNEL ?? data) as Record<string, unknown>;
-      console.log("[SOOP] CHANNEL fields:", JSON.stringify(ch));
-
-      const result = Number(ch.RESULT);
-      if (result === -6) throw new Error(`채널을 찾을 수 없습니다: ${channelId}`);
-      if (result !== 1)  throw new Error(`방송 중이 아닙니다 (RESULT=${result}, 채널: ${channelId})`);
-
-      const domain = String(ch.CHDOMAIN ?? ch.chdomain ?? "");
-      const port   = String(ch.CHPT    ?? ch.chpt    ?? "9000");
-      const chatNo = String(ch.CHATNO  ?? ch.chatno  ?? "");
-      const bno    = String(ch.BNO     ?? ch.bno     ?? "");
-      const ftk    = String(ch.FTK     ?? ch.ftk     ?? "");
-
-      if (!domain) throw new Error(`SOOP API 응답에 채팅 서버 주소(CHDOMAIN)가 없습니다. 응답: ${JSON.stringify(data).slice(0, 200)}`);
-
-      return { chatDomain: domain, chatPort: port, chatNo, ftk, bno };
-    } catch (e) {
-      lastError = e instanceof Error ? e : new Error(String(e));
-      if (
-        lastError.message.includes("찾을 수 없습니다") ||
-        lastError.message.includes("방송 중이 아닙니다") ||
-        lastError.message.includes("CHDOMAIN")
-      ) throw lastError;
-    }
-  }
-  throw lastError;
-}
+const COMMON_HEADERS = {
+  "Content-Type": "application/x-www-form-urlencoded",
+  "Referer": "https://play.sooplive.co.kr/",
+  "Origin": "https://play.sooplive.co.kr",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+};
 
 export class SoopChatConnector implements ChatConnector {
   private ws: WebSocket | null = null;
   private messageCallback: ((msg: ChatMessage) => void) | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private _connected = false;
+  private cookies = "";
+
+  async login(uid: string, password: string): Promise<void> {
+    let lastError: Error = new Error("알 수 없는 오류");
+
+    for (const url of LOGIN_ENDPOINTS) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: COMMON_HEADERS,
+          body: new URLSearchParams({
+            szWork: "login",
+            szType: "json",
+            szUid: uid,
+            szPassword: password,
+          }).toString(),
+          signal: AbortSignal.timeout(8_000),
+        });
+
+        if (!res.ok) { lastError = new Error(`HTTP ${res.status} (${url})`); continue; }
+
+        const data = await res.json() as Record<string, unknown>;
+        // 비밀번호/쿠키는 로그에 출력하지 않음
+        console.log("[SOOP] login response RESULT:", data.RESULT ?? data.result ?? "(없음)");
+
+        // 로그인 실패 체크
+        const result = data.RESULT ?? data.result;
+        if (result !== undefined && Number(result) < 0) {
+          throw new Error(`로그인 실패 (RESULT=${result}). 아이디/비밀번호를 확인하세요.`);
+        }
+
+        // Set-Cookie 헤더에서 쿠키 추출 (Node.js 18+)
+        const setCookies: string[] = [];
+        try {
+          const arr = (res.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() ?? [];
+          setCookies.push(...arr.map((c) => c.split(";")[0]));
+        } catch {
+          const raw = res.headers.get("set-cookie");
+          if (raw) setCookies.push(...raw.split(",").map((c) => c.split(";")[0].trim()));
+        }
+
+        if (setCookies.length === 0) {
+          throw new Error("로그인 실패: 쿠키를 받지 못했습니다. 아이디/비밀번호를 확인하세요.");
+        }
+
+        this.cookies = setCookies.join("; ");
+        console.log("[SOOP] login success, cookie count:", setCookies.length);
+        return;
+      } catch (e) {
+        lastError = e instanceof Error ? e : new Error(String(e));
+        if (lastError.message.includes("실패") || lastError.message.includes("RESULT")) throw lastError;
+      }
+    }
+    throw lastError;
+  }
+
+  private async fetchBroadcastInfo(channelId: string): Promise<BroadcastInfo> {
+    let lastError: Error = new Error("알 수 없는 오류");
+
+    const headers: Record<string, string> = { ...COMMON_HEADERS };
+    if (this.cookies) headers["Cookie"] = this.cookies;
+
+    for (const url of API_ENDPOINTS) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers,
+          body: `bid=${encodeURIComponent(channelId)}&mode=landing&player_type=html5`,
+          signal: AbortSignal.timeout(8_000),
+        });
+        if (!res.ok) { lastError = new Error(`HTTP ${res.status} (${url})`); continue; }
+
+        const data = await res.json() as Record<string, unknown>;
+        const ch = (data.CHANNEL ?? data) as Record<string, unknown>;
+        console.log("[SOOP] CHANNEL fields:", JSON.stringify(ch));
+
+        const result = Number(ch.RESULT);
+        if (result === -6) throw new Error(`채널을 찾을 수 없습니다: ${channelId}`);
+        if (result !== 1)  throw new Error(`방송 중이 아닙니다 (RESULT=${result}, 채널: ${channelId})`);
+
+        const domain = String(ch.CHDOMAIN ?? ch.chdomain ?? "");
+        const port   = String(ch.CHPT    ?? ch.chpt    ?? "9000");
+        const chatNo = String(ch.CHATNO  ?? ch.chatno  ?? "");
+        const bno    = String(ch.BNO     ?? ch.bno     ?? "");
+        const ftk    = String(ch.FTK     ?? ch.ftk     ?? "");
+
+        if (!domain) throw new Error(`채팅 서버 주소(CHDOMAIN)가 없습니다. 응답: ${JSON.stringify(data).slice(0, 200)}`);
+
+        if (!ftk) console.warn("[SOOP] 경고: FTK가 비어있습니다. 로그인 없이 연결을 시도합니다.");
+
+        return { chatDomain: domain, chatPort: port, chatNo, ftk, bno };
+      } catch (e) {
+        lastError = e instanceof Error ? e : new Error(String(e));
+        if (
+          lastError.message.includes("찾을 수 없습니다") ||
+          lastError.message.includes("방송 중이 아닙니다") ||
+          lastError.message.includes("CHDOMAIN")
+        ) throw lastError;
+      }
+    }
+    throw lastError;
+  }
 
   async connect(channelId: string): Promise<void> {
-    const info = await fetchBroadcastInfo(channelId);
+    const info = await this.fetchBroadcastInfo(channelId);
     const joinBody = ["", channelId, info.bno, "0", "0", "", info.ftk, "", "2", info.chatNo, ""].join(F);
     const wsHeaders = {
       "Origin": "https://play.sooplive.co.kr",
       "Referer": "https://play.sooplive.co.kr/",
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      ...(this.cookies ? { "Cookie": this.cookies } : {}),
     };
 
     const tryConnect = (wsUrl: string, rejectUnauthorized = true): Promise<void> =>
@@ -154,9 +220,9 @@ export class SoopChatConnector implements ChatConnector {
 
     const base = `${info.chatDomain}:${info.chatPort}/Websocket/${channelId}`;
     const attempts: Array<[string, boolean]> = [
-      [`wss://${base}`, true],   // wss + cert 검증
-      [`wss://${base}`, false],  // wss + 자체서명 인증서 허용
-      [`ws://${base}`,  true],   // ws (평문)
+      [`wss://${base}`, true],
+      [`wss://${base}`, false],
+      [`ws://${base}`,  true],
     ];
     let lastErr: Error = new Error("알 수 없는 오류");
     for (const [url, rejectUnauth] of attempts) {
