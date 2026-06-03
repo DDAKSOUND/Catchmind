@@ -1,6 +1,11 @@
 import WebSocket from "ws";
+import { createHash } from "crypto";
 import type { ChatConnector } from "./ChatConnector";
 import type { ChatMessage } from "@/types/chat";
+
+function md5(s: string): string {
+  return createHash("md5").update(s).digest("hex");
+}
 
 // SOOP(구 아프리카TV) 채팅 프로토콜 상수
 const F = "\x0C"; // 필드 구분자 (Form Feed)
@@ -63,54 +68,64 @@ export class SoopChatConnector implements ChatConnector {
   private cookies = "";
 
   async login(uid: string, password: string): Promise<void> {
+    // SOOP API는 MD5 해시된 비밀번호를 요구합니다 (RESULT=-33 = 평문 거부)
+    const attempts: Array<{ szPassword: string; szPasswordType?: string }> = [
+      { szPassword: md5(password), szPasswordType: "md5" },
+      { szPassword: md5(password) },
+      { szPassword: password },
+    ];
+
     let lastError: Error = new Error("알 수 없는 오류");
 
     for (const url of LOGIN_ENDPOINTS) {
-      try {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: COMMON_HEADERS,
-          body: new URLSearchParams({
-            szWork: "login",
-            szType: "json",
-            szUid: uid,
-            szPassword: password,
-          }).toString(),
-          signal: AbortSignal.timeout(8_000),
-        });
-
-        if (!res.ok) { lastError = new Error(`HTTP ${res.status} (${url})`); continue; }
-
-        const data = await res.json() as Record<string, unknown>;
-        // 비밀번호/쿠키는 로그에 출력하지 않음
-        console.log("[SOOP] login response RESULT:", data.RESULT ?? data.result ?? "(없음)");
-
-        // 로그인 실패 체크
-        const result = data.RESULT ?? data.result;
-        if (result !== undefined && Number(result) < 0) {
-          throw new Error(`로그인 실패 (RESULT=${result}). 아이디/비밀번호를 확인하세요.`);
-        }
-
-        // Set-Cookie 헤더에서 쿠키 추출 (Node.js 18+)
-        const setCookies: string[] = [];
+      for (const pwParams of attempts) {
         try {
-          const arr = (res.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() ?? [];
-          setCookies.push(...arr.map((c) => c.split(";")[0]));
-        } catch {
-          const raw = res.headers.get("set-cookie");
-          if (raw) setCookies.push(...raw.split(",").map((c) => c.split(";")[0].trim()));
-        }
+          const res = await fetch(url, {
+            method: "POST",
+            headers: COMMON_HEADERS,
+            body: new URLSearchParams({
+              szWork: "login",
+              szType: "json",
+              szUid: uid,
+              nAutoLogin: "0",
+              ...pwParams,
+            }).toString(),
+            signal: AbortSignal.timeout(8_000),
+          });
 
-        if (setCookies.length === 0) {
-          throw new Error("로그인 실패: 쿠키를 받지 못했습니다. 아이디/비밀번호를 확인하세요.");
-        }
+          if (!res.ok) { lastError = new Error(`HTTP ${res.status} (${url})`); break; }
 
-        this.cookies = setCookies.join("; ");
-        console.log("[SOOP] login success, cookie count:", setCookies.length);
-        return;
-      } catch (e) {
-        lastError = e instanceof Error ? e : new Error(String(e));
-        if (lastError.message.includes("실패") || lastError.message.includes("RESULT")) throw lastError;
+          const data = await res.json() as Record<string, unknown>;
+          const result = data.RESULT ?? data.result;
+          console.log("[SOOP] login RESULT:", result, "/ pwType:", pwParams.szPasswordType ?? "none");
+
+          if (result !== undefined && Number(result) < 0) {
+            // -33: MD5 방식 불일치, 다음 방법 시도
+            if (Number(result) === -33) { lastError = new Error(`RESULT=${result}`); continue; }
+            throw new Error(`로그인 실패 (RESULT=${result}). 아이디/비밀번호를 확인하세요.`);
+          }
+
+          // Set-Cookie 헤더에서 쿠키 추출 (Node.js 18+)
+          const setCookies: string[] = [];
+          try {
+            const arr = (res.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() ?? [];
+            setCookies.push(...arr.map((c) => c.split(";")[0]));
+          } catch {
+            const raw = res.headers.get("set-cookie");
+            if (raw) setCookies.push(...raw.split(",").map((c) => c.split(";")[0].trim()));
+          }
+
+          if (setCookies.length === 0) {
+            throw new Error("로그인 실패: 쿠키를 받지 못했습니다. 아이디/비밀번호를 확인하세요.");
+          }
+
+          this.cookies = setCookies.join("; ");
+          console.log("[SOOP] login success, cookie count:", setCookies.length);
+          return;
+        } catch (e) {
+          lastError = e instanceof Error ? e : new Error(String(e));
+          if (lastError.message.includes("실패") || lastError.message.includes("확인하세요")) throw lastError;
+        }
       }
     }
     throw lastError;
