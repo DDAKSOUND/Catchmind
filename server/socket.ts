@@ -85,15 +85,17 @@ export function initSocket(httpServer: HTTPServer): IOServer {
 
     socket.on("admin:auth", (pin: string, callback?: (ok: boolean) => void) => {
       if (!ADMIN_PIN) {
-        // PIN 미설정 시 개발 환경에서는 허용
         authedSocketIds.add(socket.id);
+        console.log(`[socket] admin:auth OK (no PIN set) socket=${socket.id}`);
         callback?.(true);
         return;
       }
       if (pin === ADMIN_PIN) {
         authedSocketIds.add(socket.id);
+        console.log(`[socket] admin:auth OK socket=${socket.id}`);
         callback?.(true);
       } else {
+        console.log(`[socket] admin:auth FAIL socket=${socket.id}`);
         callback?.(false);
       }
     });
@@ -136,6 +138,8 @@ export function initSocket(httpServer: HTTPServer): IOServer {
       const channelId = typeof p === "string" ? p : p.channelId;
       const uid       = typeof p === "object" ? p.uid : undefined;
       const password  = typeof p === "object" ? p.password : undefined;
+
+      console.log(`[socket] admin:connectSoop channel=${channelId} uid=${uid ?? "(none)"}`);
 
       try {
         if (soopConnector) {

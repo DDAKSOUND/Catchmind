@@ -1,10 +1,53 @@
 import WebSocket from "ws";
-import { createHash } from "crypto";
+import https from "https";
+import http from "http";
+import { createHash, randomBytes } from "crypto";
 import type { ChatConnector } from "./ChatConnector";
 import type { ChatMessage } from "@/types/chat";
 
 function md5(s: string): string {
   return createHash("md5").update(s).digest("hex");
+}
+
+// 연결 전 서버가 보내는 Sec-WebSocket-Protocol 헤더를 감지
+function probeSubprotocol(wsUrl: string, headers: Record<string, string>): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    try {
+      const isSecure = wsUrl.startsWith("wss://");
+      const httpUrl  = wsUrl.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
+      const urlObj   = new URL(httpUrl);
+      const mod      = isSecure ? https : http;
+
+      const req = mod.request({
+        hostname: urlObj.hostname,
+        port:     Number(urlObj.port) || (isSecure ? 443 : 80),
+        path:     urlObj.pathname,
+        method:   "GET",
+        headers: {
+          ...headers,
+          "Connection":            "Upgrade",
+          "Upgrade":               "websocket",
+          "Sec-WebSocket-Key":     randomBytes(16).toString("base64"),
+          "Sec-WebSocket-Version": "13",
+        },
+        rejectUnauthorized: false,
+        timeout: 5_000,
+      } as Parameters<typeof mod.request>[0]);
+
+      req.on("upgrade", (res) => {
+        const proto = res.headers["sec-websocket-protocol"] as string | undefined;
+        console.log("[SOOP] probeSubprotocol:", proto ?? "(none)");
+        (res.socket as import("net").Socket).destroy();
+        resolve(proto);
+      });
+      req.on("error",   () => resolve(undefined));
+      req.on("timeout", () => { req.destroy(); resolve(undefined); });
+      req.on("response", () => resolve(undefined)); // non-101 응답
+      req.end();
+    } catch {
+      resolve(undefined);
+    }
+  });
 }
 
 // SOOP(구 아프리카TV) 채팅 프로토콜 상수
@@ -188,16 +231,18 @@ export class SoopChatConnector implements ChatConnector {
       ...(this.cookies ? { "Cookie": this.cookies } : {}),
     };
 
-    const tryConnect = (wsUrl: string, rejectUnauthorized = true): Promise<void> =>
+    const tryConnect = (wsUrl: string, rejectUnauthorized = true, protocol?: string): Promise<void> =>
       new Promise((resolve, reject) => {
-        console.log("[SOOP] connecting to", wsUrl, rejectUnauthorized ? "" : "(rejectUnauthorized=false)");
+        console.log("[SOOP] connecting to", wsUrl, protocol ? `protocol=${protocol}` : "", rejectUnauthorized ? "" : "(rejectUnauthorized=false)");
         const wsOpts: import("ws").ClientOptions = {
           headers: wsHeaders,
           ...(wsUrl.startsWith("wss://") && !rejectUnauthorized
             ? { rejectUnauthorized: false }
             : {}),
         };
-        const ws = new WebSocket(wsUrl, wsOpts);
+        const ws = protocol
+          ? new WebSocket(wsUrl, [protocol], wsOpts)
+          : new WebSocket(wsUrl, wsOpts);
         const timeout = setTimeout(() => { ws.terminate(); reject(new Error("timeout")); }, 12_000);
 
         let stage: "connecting" | "joining" | "done" = "connecting";
@@ -234,15 +279,20 @@ export class SoopChatConnector implements ChatConnector {
       });
 
     const base = `${info.chatDomain}:${info.chatPort}/Websocket/${channelId}`;
-    const attempts: Array<[string, boolean]> = [
-      [`wss://${base}`, true],
-      [`wss://${base}`, false],
-      [`ws://${base}`,  true],
+
+    // wss로 먼저 subprotocol 감지 (서버가 Sec-WebSocket-Protocol을 보내는 경우 대응)
+    const detectedProtocol = await probeSubprotocol(`wss://${base}`, wsHeaders);
+
+    // [url, rejectUnauthorized, protocol]
+    const attempts: Array<[string, boolean, string | undefined]> = [
+      [`wss://${base}`, true,  detectedProtocol],
+      [`wss://${base}`, false, detectedProtocol],
+      [`ws://${base}`,  true,  detectedProtocol],
     ];
     let lastErr: Error = new Error("알 수 없는 오류");
-    for (const [url, rejectUnauth] of attempts) {
+    for (const [url, rejectUnauth, proto] of attempts) {
       try {
-        await tryConnect(url, rejectUnauth);
+        await tryConnect(url, rejectUnauth, proto);
         return;
       } catch (e) {
         lastErr = e instanceof Error ? e : new Error(String(e));
