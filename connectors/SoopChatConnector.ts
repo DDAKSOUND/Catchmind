@@ -16,9 +16,7 @@ function probeSubprotocol(wsUrl: string, headers: Record<string, string>): Promi
       const isSecure = wsUrl.startsWith("wss://");
       const httpUrl  = wsUrl.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
       const urlObj   = new URL(httpUrl);
-      const mod      = isSecure ? https : http;
-
-      const req = mod.request({
+      const reqOptions = {
         hostname: urlObj.hostname,
         port:     Number(urlObj.port) || (isSecure ? 443 : 80),
         path:     urlObj.pathname,
@@ -32,7 +30,8 @@ function probeSubprotocol(wsUrl: string, headers: Record<string, string>): Promi
         },
         rejectUnauthorized: false,
         timeout: 5_000,
-      } as Parameters<typeof mod.request>[0]);
+      };
+      const req = isSecure ? https.request(reqOptions) : http.request(reqOptions);
 
       req.on("upgrade", (res) => {
         const proto = res.headers["sec-websocket-protocol"] as string | undefined;
